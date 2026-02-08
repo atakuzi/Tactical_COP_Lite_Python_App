@@ -1,17 +1,17 @@
 
 import os
-import io
 import json
 import time
 import sqlite3
 import threading
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional, Any, Dict, List
 
 import numpy as np
 import cv2
-from fastapi import FastAPI, Request, Response, UploadFile, File, Body, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi import FastAPI, Request, Response, HTTPException
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -91,15 +91,16 @@ class TrackIn(BaseModel):
 class BFTBatch(BaseModel):
     tracks: List[TrackIn]
 
-app = FastAPI(title=APP_TITLE)
+@asynccontextmanager
+async def lifespan(app):
+    init_db()
+    yield
+
+app = FastAPI(title=APP_TITLE, lifespan=lifespan)
 
 BASE_DIR = os.path.dirname(__file__)
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
-
-@app.on_event("startup")
-def on_startup():
-    init_db()
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
@@ -248,9 +249,6 @@ def video_mjpeg():
             time.sleep(0.05)
 
     return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
-
-
-from fastapi.responses import HTMLResponse
 
 @app.get("/video/pip", response_class=HTMLResponse)
 def video_pip():
