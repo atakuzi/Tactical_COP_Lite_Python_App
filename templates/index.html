@@ -1,0 +1,77 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>{{ app_title }}</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+  <link rel="stylesheet" href="/static/style.css"/>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="title">{{ app_title }}</div>
+      <div class="subtitle">Brigade & below • fast, uncluttered, comms-loss tolerant</div>
+    </div>
+
+    <div class="controls">
+      <div class="toggles">
+        <label><input type="checkbox" data-layer="friendly" checked> Friendly</label>
+        <label><input type="checkbox" data-layer="enemy" checked> Enemy</label>
+        <label><input type="checkbox" data-layer="fires" checked> Fires</label>
+        <label><input type="checkbox" data-layer="air" checked> Air</label>
+        <label><input type="checkbox" data-layer="ew" checked> EW</label>
+      </div>
+
+      <div class="actions">
+        <button id="btn-center">Center</button>
+        <button id="btn-demo">Inject Demo Tracks</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="map-wrap">
+      <div id="map"></div>
+      <div class="statusbar">
+        <span id="status">Loading…</span>
+        <span class="sep">•</span>
+        <span>Stale threshold: <b>90s</b></span>
+      </div>
+    </section>
+
+    <aside class="sidepanel">
+      <div class="panel">
+        <div class="panel-title">FMV (PiP)</div>
+        <div class="panel-body">
+          <div class="video-box">
+            <img id="mjpeg" src="/video/mjpeg" alt="FMV stream"/>
+            <div class="video-controls">
+              <button id="pip">Picture-in-Picture</button>
+              <button id="pop">Pop out</button>
+            </div>
+          </div>
+          <div class="hint">
+            For RTSP: set <code>RTSP_URL</code>. This demo uses MJPEG for browser simplicity.
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">Track List</div>
+        <div class="panel-body">
+          <div id="tracklist" class="tracklist"></div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
