@@ -16,10 +16,21 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 from lxml import etree
+from tak_bridge import TAKBridge
 
 APP_TITLE = "Tactical COP Lite"
 DB_PATH = os.getenv("COP_DB_PATH", "cop.db")
 RTSP_URL = os.getenv("RTSP_URL", "").strip()
+
+# TAK Server bridge (opt-in: set TAK_HOST to enable)
+TAK_HOST = os.getenv("TAK_HOST", "").strip()
+TAK_PORT = int(os.getenv("TAK_PORT", "8087"))
+TAK_TLS = os.getenv("TAK_TLS", "false").strip().lower() in ("1", "true", "yes")
+TAK_CERT = os.getenv("TAK_CERT", "").strip()
+TAK_KEY = os.getenv("TAK_KEY", "").strip()
+TAK_CA = os.getenv("TAK_CA", "").strip()
+TAK_CALLSIGN = os.getenv("TAK_CALLSIGN", "COP-LITE").strip()
+TAK_PUSH_INTERVAL = int(os.getenv("TAK_PUSH_INTERVAL", "30"))
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -94,7 +105,11 @@ class BFTBatch(BaseModel):
 @asynccontextmanager
 async def lifespan(app):
     init_db()
+    if tak_bridge:
+        tak_bridge.start()
     yield
+    if tak_bridge:
+        tak_bridge.stop()
 
 app = FastAPI(title=APP_TITLE, lifespan=lifespan)
 
@@ -179,6 +194,12 @@ def pull_cot():
     xml = b"\n".join(events) if events else b""
     return Response(content=xml, media_type="application/xml")
 
+@app.get("/api/tak/status")
+def api_tak_status():
+    if tak_bridge is None:
+        return {"enabled": False, "reason": "TAK_HOST not configured"}
+    return {"enabled": True, **tak_bridge.status()}
+
 # --- MJPEG video streaming (RTSP -> MJPEG) ---
 class FrameSource:
     def __init__(self, rtsp_url: str):
@@ -234,6 +255,22 @@ class FrameSource:
             return self.frame_jpeg
 
 frame_source = FrameSource(RTSP_URL)
+
+# TAK Server bridge (only created when TAK_HOST is configured)
+tak_bridge: Optional[TAKBridge] = None
+if TAK_HOST:
+    tak_bridge = TAKBridge(
+        host=TAK_HOST,
+        port=TAK_PORT,
+        tls=TAK_TLS,
+        cert_path=TAK_CERT,
+        key_path=TAK_KEY,
+        ca_path=TAK_CA,
+        callsign=TAK_CALLSIGN,
+        push_interval=TAK_PUSH_INTERVAL,
+        upsert_fn=upsert_track,
+        list_fn=list_tracks,
+    )
 
 @app.get("/video/mjpeg")
 def video_mjpeg():
