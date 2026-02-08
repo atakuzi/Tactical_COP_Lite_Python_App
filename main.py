@@ -138,12 +138,16 @@ async def ingest_cot(request: Request):
         side = "friendly" if cot_type.startswith("a-f") else "enemy" if cot_type.startswith("a-h") else "unknown"
         # map side to layer for display
         layer = "friendly" if side == "friendly" else "enemy" if side == "enemy" else "other"
+        # derive a default MIL-STD-2525C SIDC from the CoT type
+        aff = "F" if side == "friendly" else "H" if side == "enemy" else "U"
+        dim = "A" if cot_type.startswith(("a-f-A", "a-h-A")) else "G"
+        sidc = f"S{aff}{dim}P------*****"
         pt = root.find(".//point")
         if pt is None:
             raise ValueError("No point element")
         lat = float(pt.get("lat"))
         lon = float(pt.get("lon"))
-        meta = {"cot_type": cot_type, "how": root.get("how"), "time": root.get("time"), "start": root.get("start"), "stale": root.get("stale")}
+        meta = {"cot_type": cot_type, "how": root.get("how"), "time": root.get("time"), "start": root.get("start"), "stale": root.get("stale"), "sidc": sidc}
         upsert_track(uid, side, layer, lat, lon, meta)
         return {"ok": True, "uid": uid}
     except Exception as e:

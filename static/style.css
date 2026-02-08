@@ -60,14 +60,15 @@ button:hover { background: var(--btnHover); }
 .track .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .badge {
   font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line);
-  color: var(--muted);
+  color: var(--muted); text-transform: uppercase; font-weight: 600;
 }
+.badge-friendly { color: #80e0ff; border-color: #80e0ff; }
+.badge-enemy    { color: #ff8080; border-color: #ff8080; }
+.badge-neutral  { color: #aaffaa; border-color: #aaffaa; }
+.badge-unknown  { color: #ffff80; border-color: #ffff80; }
 .track .small { color: var(--muted); font-size: 12px; }
 .track.stale { opacity: 0.55; }
 
 
-/* Leaflet divIcon styling */
-.sym{font-size:18px;line-height:18px;text-align:center;}
-.sym-friendly{color:#4ade80;}
-.sym-enemy{color:#f87171;}
-.sym-other{color:#fbbf24;}
+/* MIL-STD-2525 milsymbol markers */
+.leaflet-div-icon { background: none; border: none; }

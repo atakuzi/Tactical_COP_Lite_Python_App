@@ -15,24 +15,48 @@ const layers = {
   fires: L.layerGroup().addTo(map),
   air: L.layerGroup().addTo(map),
   ew: L.layerGroup().addTo(map),
+  other: L.layerGroup().addTo(map),
 };
 
 const markersByUid = new Map();
 
+// MIL-STD-2525C SIDC construction helpers
+// Format: S-B-FFFFFF-SS-CC-OB  (15 chars, dashes omitted)
+// Pos 1: Scheme        S = Warfighting
+// Pos 2: Affiliation   F=Friendly H=Hostile N=Neutral U=Unknown
+// Pos 3: Battle dim    G=Ground A=Air P=Space U=Subsurface S=Sea F=SOF
+// Pos 4: Status        P=Present A=Anticipated
+// Pos 5-10: Function ID
+// Pos 11-15: Size/Mobility/Country/OB (use - for unused)
+
+const AFFILIATION = { friendly: "F", enemy: "H", neutral: "N", unknown: "U" };
+
+// Default SIDCs per layer (side letter is swapped in at runtime)
+const LAYER_SIDC = {
+  friendly: "S*GPUCI---*****",   // Ground unit - Infantry
+  enemy:    "S*GPUCI---*****",   // Ground unit - Infantry
+  fires:    "S*GPUCF---*****",   // Ground unit - Field Artillery
+  air:      "S*APMFQ---*****",   // Air - UAV/Drone
+  ew:       "S*GPEWM---*****",   // Ground - EW Jamming
+  other:    "S*GP------*****",   // Ground - generic
+};
+
+const SYM_SIZE = 40;
+
 function iconFor(track) {
-  // Simple symbology: circle for friendly, square for enemy, triangle for others.
-  // (Production: MIL-STD-2525/APP-6 with proper SVG icon sets.)
-  let html = "";
-  let cls = "sym sym-other";
-  if (track.side === "friendly") { html = "●"; cls = "sym sym-friendly"; }
-  else if (track.side === "enemy") { html = "■"; cls = "sym sym-enemy"; }
-  else { html = "▲"; cls = "sym sym-other"; }
+  const aff = AFFILIATION[track.side] || "U";
+  const sidc_template = track.meta?.sidc || LAYER_SIDC[track.layer] || LAYER_SIDC.other;
+  // Insert affiliation at position 2
+  const sidc = sidc_template[0] + aff + sidc_template.slice(2);
+
+  const sym = new ms.Symbol(sidc, { size: SYM_SIZE });
+  const anchor = sym.getAnchor();
 
   return L.divIcon({
-    className: cls,
-    html,
-    iconSize: [20, 20],
-    iconAnchor: [10, 10]
+    className: "",
+    html: sym.asSVG(),
+    iconSize: [sym.getSize().width, sym.getSize().height],
+    iconAnchor: [anchor.x, anchor.y],
   });
 }
 
@@ -74,7 +98,7 @@ function updateTrackList(tracks, serverTimeIso) {
     div.innerHTML = `
       <div class="row">
         <div><b>${cs}</b></div>
-        <div class="badge">${t.side}</div>
+        <div class="badge badge-${t.side}">${t.side}</div>
       </div>
       <div class="small">${t.layer} • age ${ageSec.toFixed(0)}s</div>
       <div class="small">${t.lat.toFixed(4)}, ${t.lon.toFixed(4)}</div>
@@ -116,12 +140,24 @@ document.getElementById("btn-center").addEventListener("click", () => map.setVie
 
 document.getElementById("btn-demo").addEventListener("click", async () => {
   const demo = [
-    { uid: "FRD-ALPHA1", side: "friendly", layer: "friendly", lat: 50.1109, lon: 8.6821, meta: { callsign: "ALPHA 1" } },
-    { uid: "FRD-BRAVO2", side: "friendly", layer: "friendly", lat: 52.5200, lon: 13.4050, meta: { callsign: "BRAVO 2" } },
-    { uid: "ENY-RED1", side: "enemy", layer: "enemy", lat: 51.0504, lon: 13.7373, meta: { callsign: "RED 1" } },
-    { uid: "FIRES-PLT", side: "friendly", layer: "fires", lat: 49.4521, lon: 11.0767, meta: { callsign: "Fires PLT" } },
-    { uid: "AIR-UAS1", side: "friendly", layer: "air", lat: 48.1351, lon: 11.5820, meta: { callsign: "UAS 1" } },
-    { uid: "EW-TEAM1", side: "friendly", layer: "ew", lat: 53.5511, lon: 9.9937, meta: { callsign: "EW TEAM 1" } },
+    { uid: "FRD-ALPHA1", side: "friendly", layer: "friendly", lat: 50.1109, lon: 8.6821,
+      meta: { callsign: "ALPHA 1", sidc: "SFGPUCI---D*****" } },       // Friendly Infantry Company
+    { uid: "FRD-BRAVO2", side: "friendly", layer: "friendly", lat: 52.5200, lon: 13.4050,
+      meta: { callsign: "BRAVO 2", sidc: "SFGPUCA---D*****" } },       // Friendly Armor Company
+    { uid: "ENY-RED1", side: "enemy", layer: "enemy", lat: 51.0504, lon: 13.7373,
+      meta: { callsign: "RED 1", sidc: "SHGPUCIM--E*****" } },         // Hostile Mechanized Infantry Battalion
+    { uid: "ENY-RED2", side: "enemy", layer: "enemy", lat: 50.9300, lon: 14.1200,
+      meta: { callsign: "RED 2", sidc: "SHGPUCA---D*****" } },         // Hostile Armor Company
+    { uid: "FIRES-PLT", side: "friendly", layer: "fires", lat: 49.4521, lon: 11.0767,
+      meta: { callsign: "STEEL RAIN", sidc: "SFGPUCFHE-D*****" } },    // Friendly Howitzer Battery
+    { uid: "AIR-UAS1", side: "friendly", layer: "air", lat: 48.1351, lon: 11.5820,
+      meta: { callsign: "SHADOW 6", sidc: "SFAPMFQ---*****" } },       // Friendly UAV
+    { uid: "AIR-ROTARY1", side: "friendly", layer: "air", lat: 49.8700, lon: 8.9200,
+      meta: { callsign: "DUSTOFF 9", sidc: "SFAPMHA---*****" } },      // Friendly Attack Helicopter
+    { uid: "EW-TEAM1", side: "friendly", layer: "ew", lat: 53.5511, lon: 9.9937,
+      meta: { callsign: "SPECTRE", sidc: "SFGPEWM---C*****" } },       // Friendly EW Jamming Platoon
+    { uid: "NEU-OBS1", side: "neutral", layer: "other", lat: 51.5000, lon: 10.5000,
+      meta: { callsign: "OBSERVER 1", sidc: "SNGP------*****" } },     // Neutral ground track
   ];
   for (const t of demo) {
     await fetch("/api/tracks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(t) });
