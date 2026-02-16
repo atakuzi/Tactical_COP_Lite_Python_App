@@ -2,8 +2,10 @@
 import os
 import json
 import time
+import math
 import sqlite3
 import threading
+from html import escape
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional, Any, Dict, List
@@ -21,6 +23,7 @@ from tak_bridge import TAKBridge
 APP_TITLE = "Tactical COP Lite"
 DB_PATH = os.getenv("COP_DB_PATH", "cop.db")
 RTSP_URL = os.getenv("RTSP_URL", "").strip()
+FPV_SIM_ENABLED = os.getenv("FPV_SIM_ENABLED", "true").strip().lower() in ("1", "true", "yes")
 
 # TAK Server bridge (opt-in: set TAK_HOST to enable)
 TAK_HOST = os.getenv("TAK_HOST", "").strip()
@@ -200,6 +203,73 @@ def api_tak_status():
         return {"enabled": False, "reason": "TAK_HOST not configured"}
     return {"enabled": True, **tak_bridge.status()}
 
+# --- Simulated FPV drones ---------------------------------------------------
+FPV_DRONES = [
+    {"uid": "FPV-DRONE-1", "callsign": "RAVEN-11", "base_lat": 50.1109, "base_lon": 8.6821, "radius_km": 8.0, "period_s": 140.0, "phase": 0.0},
+    {"uid": "FPV-DRONE-2", "callsign": "RAVEN-12", "base_lat": 50.2600, "base_lon": 8.9300, "radius_km": 10.0, "period_s": 165.0, "phase": 1.6},
+    {"uid": "FPV-DRONE-3", "callsign": "RAVEN-13", "base_lat": 49.9800, "base_lon": 8.2100, "radius_km": 7.0, "period_s": 120.0, "phase": 2.9},
+]
+
+
+def _simulated_fpv_state(now_ts: float) -> List[Dict[str, Any]]:
+    drones = []
+    for spec in FPV_DRONES:
+        theta = ((now_ts / spec["period_s"]) * (2.0 * math.pi)) + spec["phase"]
+        radius_deg_lat = spec["radius_km"] / 111.0
+        lat = spec["base_lat"] + radius_deg_lat * math.sin(theta)
+        lon_scale = max(0.25, math.cos(math.radians(spec["base_lat"])))
+        lon = spec["base_lon"] + (radius_deg_lat / lon_scale) * math.cos(theta)
+
+        omega = (2.0 * math.pi) / spec["period_s"]
+        speed_mps = omega * (spec["radius_km"] * 1000.0)
+        heading_deg = (math.degrees(theta) + 90.0) % 360.0
+        altitude_m = 120.0 + 30.0 * math.sin(theta * 1.7)
+        battery_pct = max(18.0, 85.0 - ((now_ts + spec["phase"] * 31.0) % 700.0) * 0.08)
+
+        drones.append({
+            "uid": spec["uid"],
+            "callsign": spec["callsign"],
+            "lat": lat,
+            "lon": lon,
+            "heading_deg": heading_deg,
+            "speed_mps": speed_mps,
+            "altitude_m": altitude_m,
+            "battery_pct": battery_pct,
+            "stream_url": f"/video/fpv/{spec['uid']}.mjpeg",
+        })
+    return drones
+
+
+def _upsert_simulated_fpv_tracks(now_ts: float) -> List[Dict[str, Any]]:
+    drones = _simulated_fpv_state(now_ts)
+    for d in drones:
+        upsert_track(
+            uid=d["uid"],
+            side="friendly",
+            layer="air",
+            lat=d["lat"],
+            lon=d["lon"],
+            meta={
+                "callsign": d["callsign"],
+                "sidc": "SFAPMFQ---*****",
+                "source": "simulated_fpv",
+                "heading_deg": round(d["heading_deg"], 1),
+                "speed_mps": round(d["speed_mps"], 1),
+                "altitude_m": round(d["altitude_m"], 1),
+                "battery_pct": round(d["battery_pct"], 1),
+            },
+        )
+    return drones
+
+
+@app.get("/api/fpv/drones")
+def api_fpv_drones():
+    if not FPV_SIM_ENABLED:
+        return {"enabled": False, "drones": []}
+    now_ts = time.time()
+    drones = _upsert_simulated_fpv_tracks(now_ts)
+    return {"enabled": True, "generated_at": utc_now_iso(), "drones": drones}
+
 # --- MJPEG video streaming (RTSP -> MJPEG) ---
 class FrameSource:
     def __init__(self, rtsp_url: str):
@@ -256,6 +326,70 @@ class FrameSource:
 
 frame_source = FrameSource(RTSP_URL)
 
+
+def _render_simulated_fpv_frame(drone: Dict[str, Any], now_ts: float) -> bytes:
+    w, h = 640, 360
+    img = np.zeros((h, w, 3), dtype=np.uint8)
+
+    horizon = int(h * 0.43 + 16 * math.sin(now_ts * 0.9 + drone["heading_deg"] * 0.01))
+    sky = np.linspace(70, 15, max(horizon, 1), dtype=np.uint8).reshape(-1, 1)
+    img[:horizon, :, 2] = sky
+    img[:horizon, :, 1] = (sky * 0.8).astype(np.uint8)
+    img[:horizon, :, 0] = (sky * 0.45).astype(np.uint8)
+
+    ground_h = h - horizon
+    if ground_h > 0:
+        ground = np.linspace(20, 75, ground_h, dtype=np.uint8).reshape(-1, 1)
+        img[horizon:, :, 1] = ground
+        img[horizon:, :, 2] = (ground * 0.3).astype(np.uint8)
+
+    t = now_ts
+    road_dx = int(70 * math.sin(t * 0.6 + drone["uid"].__hash__() % 10))
+    road_center_top = (w // 2) + (road_dx // 3)
+    road_center_bottom = (w // 2) + road_dx
+    road_width_top = 80
+    road_width_bottom = 260
+    road_poly = np.array([[
+        (road_center_top - road_width_top // 2, horizon + 8),
+        (road_center_top + road_width_top // 2, horizon + 8),
+        (road_center_bottom + road_width_bottom // 2, h - 1),
+        (road_center_bottom - road_width_bottom // 2, h - 1),
+    ]], dtype=np.int32)
+    cv2.fillPoly(img, road_poly, (65, 65, 65))
+
+    dash_y = horizon + 15
+    while dash_y < h:
+        y0 = int(dash_y + (t * 120) % 28)
+        y1 = min(y0 + 10, h - 1)
+        if y0 < h - 1:
+            x = int(road_center_top + (road_center_bottom - road_center_top) * ((y0 - horizon) / max(1, (h - horizon))))
+            cv2.line(img, (x, y0), (x, y1), (235, 235, 235), 2, cv2.LINE_AA)
+        dash_y += 28
+
+    center = (w // 2, h // 2)
+    cv2.circle(img, center, 18, (0, 255, 0), 1, cv2.LINE_AA)
+    cv2.line(img, (center[0] - 24, center[1]), (center[0] + 24, center[1]), (0, 255, 0), 1, cv2.LINE_AA)
+    cv2.line(img, (center[0], center[1] - 24), (center[0], center[1] + 24), (0, 255, 0), 1, cv2.LINE_AA)
+
+    osd = [
+        f"{drone['callsign']} FPV LINK",
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        f"LAT {drone['lat']:+.5f}  LON {drone['lon']:+.5f}",
+        f"ALT {drone['altitude_m']:.0f}m  SPD {drone['speed_mps']:.1f}m/s  HDG {drone['heading_deg']:.0f}",
+        f"BAT {drone['battery_pct']:.0f}%",
+    ]
+    y = 24
+    for line in osd:
+        cv2.putText(img, line, (14, y), cv2.FONT_HERSHEY_SIMPLEX, 0.56, (0, 255, 0), 1, cv2.LINE_AA)
+        y += 22
+
+    cv2.rectangle(img, (w - 132, 12), (w - 16, 30), (35, 35, 35), -1)
+    bat_w = int(108 * (drone["battery_pct"] / 100.0))
+    cv2.rectangle(img, (w - 128, 16), (w - 128 + bat_w, 26), (0, 200, 0), -1)
+
+    ok, jpg = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 78])
+    return jpg.tobytes() if ok else b""
+
 # TAK Server bridge (only created when TAK_HOST is configured)
 tak_bridge: Optional[TAKBridge] = None
 if TAK_HOST:
@@ -291,9 +425,43 @@ def video_mjpeg():
 
     return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
+
+@app.get("/video/fpv/{drone_uid}.mjpeg")
+def video_fpv(drone_uid: str):
+    if not FPV_SIM_ENABLED:
+        raise HTTPException(status_code=404, detail="Simulated FPV disabled")
+
+    valid_uids = {d["uid"] for d in FPV_DRONES}
+    if drone_uid not in valid_uids:
+        raise HTTPException(status_code=404, detail="Unknown drone")
+
+    def gen():
+        boundary = b"--frame"
+        while True:
+            now_ts = time.time()
+            drones = _simulated_fpv_state(now_ts)
+            drone = next((d for d in drones if d["uid"] == drone_uid), None)
+            if drone is None:
+                time.sleep(0.1)
+                continue
+            jpg = _render_simulated_fpv_frame(drone, now_ts)
+            if not jpg:
+                time.sleep(0.05)
+                continue
+            yield boundary + b"\r\n"
+            yield b"Content-Type: image/jpeg\r\n"
+            yield f"Content-Length: {len(jpg)}\r\n\r\n".encode("utf-8")
+            yield jpg + b"\r\n"
+            time.sleep(0.08)
+
+    return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+
 @app.get("/video/pip", response_class=HTMLResponse)
-def video_pip():
-    return HTMLResponse(content="""
+def video_pip(src: str = "/video/mjpeg"):
+    if not src.startswith("/video/"):
+        src = "/video/mjpeg"
+    safe_src = escape(src, quote=True)
+    return HTMLResponse(content=f"""
 <!doctype html>
 <html>
 <head>
@@ -306,11 +474,11 @@ def video_pip():
   </style>
 </head>
 <body>
-  <img src="/video/mjpeg" alt="FMV"/>
+  <img src="{safe_src}" alt="FMV"/>
 </body>
 </html>
 """)
 
 @app.get("/video/view", response_class=HTMLResponse)
-def video_view():
-    return video_pip()
+def video_view(src: str = "/video/mjpeg"):
+    return video_pip(src=src)

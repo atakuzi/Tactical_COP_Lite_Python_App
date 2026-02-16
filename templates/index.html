@@ -4,6 +4,9 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>{{ app_title }}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@blueprintjs/icons@5/lib/css/blueprint-icons.css"/>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@blueprintjs/core@5/lib/css/blueprint.css"/>
@@ -16,11 +19,14 @@
 
   <link rel="stylesheet" href="/static/style.css"/>
 </head>
-<body class="bp5-dark">
+<body class="bp5-dark foundry-shell">
   <header class="bp5-navbar topbar">
     <div class="bp5-navbar-group bp5-align-left brand">
-      <span class="bp5-navbar-heading">{{ app_title }}</span>
-      <span class="subtitle bp5-text-muted">Brigade and below | fast, uncluttered, comms-loss tolerant</span>
+      <div class="brand-block">
+        <span class="eyebrow">TACTICAL ANALYTICS WORKSPACE</span>
+        <span class="bp5-navbar-heading brand-title">{{ app_title }}</span>
+      </div>
+      <span class="subtitle bp5-text-muted">Brigade and below | comms-loss tolerant operational picture</span>
     </div>
 
     <div class="bp5-navbar-group bp5-align-right controls">
@@ -42,6 +48,7 @@
 
   <main class="layout">
     <section class="map-wrap">
+      <div class="map-chrome" aria-hidden="true"></div>
       <div id="map"></div>
       <div class="statusbar bp5-card bp5-elevation-1">
         <span id="status" class="bp5-text-muted">Loading...</span>
@@ -52,8 +59,18 @@
 
     <aside class="sidepanel">
       <section class="bp5-card bp5-elevation-1 panel">
-        <h4 class="bp5-heading panel-title">FMV (PiP)</h4>
+        <div class="panel-head">
+          <h4 class="bp5-heading panel-title">Sensor Video</h4>
+          <span class="panel-subtitle">FMV / FPV Feeds</span>
+        </div>
         <div class="panel-body">
+          <div class="fpv-controls">
+            <label class="bp5-label fpv-label" for="fpv-select">Source</label>
+            <select id="fpv-select" class="bp5-html-select">
+              <option value="/video/mjpeg">Primary FMV</option>
+            </select>
+          </div>
+          <div id="fpv-list" class="fpv-list" aria-label="Simulated FPV drones"></div>
           <div class="video-box">
             <img id="mjpeg" src="/video/mjpeg" alt="FMV stream"/>
           </div>
@@ -61,12 +78,15 @@
             <button id="pip" class="bp5-button bp5-small bp5-icon-media">Picture-in-Picture</button>
             <button id="pop" class="bp5-button bp5-small bp5-icon-share">Pop out</button>
           </div>
-          <p class="hint bp5-text-muted">For RTSP: set <code>RTSP_URL</code>. This demo uses MJPEG for browser simplicity.</p>
+          <p class="hint bp5-text-muted">For RTSP: set <code>RTSP_URL</code>. Simulated FPV drones are available via <code>/api/fpv/drones</code>.</p>
         </div>
       </section>
 
       <section class="bp5-card bp5-elevation-1 panel">
-        <h4 class="bp5-heading panel-title">Track List</h4>
+        <div class="panel-head">
+          <h4 class="bp5-heading panel-title">Track Ledger</h4>
+          <span class="panel-subtitle">Live Entity Index</span>
+        </div>
         <div class="panel-body">
           <div id="tracklist" class="tracklist"></div>
         </div>

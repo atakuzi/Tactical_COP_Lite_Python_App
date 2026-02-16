@@ -2,6 +2,9 @@ const STALE_SEC = 90;
 
 const statusEl = document.getElementById("status");
 const tracklistEl = document.getElementById("tracklist");
+const mjpegEl = document.getElementById("mjpeg");
+const fpvSelectEl = document.getElementById("fpv-select");
+const fpvListEl = document.getElementById("fpv-list");
 
 const map = L.map("map", { zoomControl: true }).setView([50.1109, 8.6821], 6);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -32,6 +35,12 @@ const LAYER_SIDC = {
 };
 
 const SYM_SIZE = 40;
+const DEFAULT_VIDEO_STREAM = "/video/mjpeg";
+const fpvState = {
+  selectedStream: DEFAULT_VIDEO_STREAM,
+  drones: [],
+  byUid: new Map(),
+};
 
 function iconFor(track) {
   const aff = AFFILIATION[track.side] || "U";
@@ -116,8 +125,67 @@ async function refresh() {
   }
 }
 
+function syncStreamSelection() {
+  const desired = fpvSelectEl.value || DEFAULT_VIDEO_STREAM;
+  if (mjpegEl.getAttribute("src") !== desired) {
+    mjpegEl.setAttribute("src", desired);
+  }
+  fpvState.selectedStream = desired;
+}
+
+function renderFpvControls() {
+  const current = fpvState.selectedStream || DEFAULT_VIDEO_STREAM;
+  fpvSelectEl.innerHTML = "";
+
+  const primaryOpt = document.createElement("option");
+  primaryOpt.value = DEFAULT_VIDEO_STREAM;
+  primaryOpt.textContent = "Primary FMV";
+  fpvSelectEl.appendChild(primaryOpt);
+
+  for (const d of fpvState.drones) {
+    const opt = document.createElement("option");
+    opt.value = d.stream_url;
+    opt.textContent = `${d.callsign} (${d.uid})`;
+    fpvSelectEl.appendChild(opt);
+  }
+
+  const validStreams = new Set([DEFAULT_VIDEO_STREAM, ...fpvState.drones.map((d) => d.stream_url)]);
+  fpvSelectEl.value = validStreams.has(current) ? current : DEFAULT_VIDEO_STREAM;
+  syncStreamSelection();
+
+  fpvListEl.innerHTML = "";
+  for (const d of fpvState.drones) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "bp5-button bp5-small fpv-chip";
+    btn.textContent = d.callsign;
+    btn.addEventListener("click", () => {
+      fpvSelectEl.value = d.stream_url;
+      syncStreamSelection();
+      map.setView([d.lat, d.lon], Math.max(map.getZoom(), 12));
+    });
+    fpvListEl.appendChild(btn);
+  }
+}
+
+async function refreshFpvDrones() {
+  try {
+    const res = await fetch("/api/fpv/drones");
+    if (!res.ok) return;
+    const data = await res.json();
+    const drones = data.enabled ? (data.drones || []) : [];
+    fpvState.drones = drones;
+    fpvState.byUid = new Map(drones.map((d) => [d.uid, d]));
+    renderFpvControls();
+  } catch (e) {
+    // FPV simulation is optional.
+  }
+}
+
 setInterval(refresh, 1500);
 refresh();
+setInterval(refreshFpvDrones, 3000);
+refreshFpvDrones();
 
 document.querySelectorAll('input[type="checkbox"][data-layer]').forEach((cb) => {
   cb.addEventListener("change", () => {
@@ -174,9 +242,14 @@ document.getElementById("btn-demo").addEventListener("click", async () => {
 
 const pipBtn = document.getElementById("pip");
 const popBtn = document.getElementById("pop");
+fpvSelectEl.addEventListener("change", syncStreamSelection);
 
 pipBtn.addEventListener("click", async () => {
-  window.open("/video/pip", "FMV_PIP", "width=420,height=280");
+  const src = encodeURIComponent(fpvState.selectedStream || DEFAULT_VIDEO_STREAM);
+  window.open(`/video/pip?src=${src}`, "FMV_PIP", "width=420,height=280");
 });
 
-popBtn.addEventListener("click", () => window.open("/video/view", "_blank"));
+popBtn.addEventListener("click", () => {
+  const src = encodeURIComponent(fpvState.selectedStream || DEFAULT_VIDEO_STREAM);
+  window.open(`/video/view?src=${src}`, "_blank");
+});
