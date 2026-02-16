@@ -34,6 +34,7 @@ class ZenohBridge:
         self._lock = threading.Lock()
         self._running = False
         self._ready = False
+        self._available = True
         self._session = None
         self._publisher = None
         self._subscriber = None
@@ -45,6 +46,14 @@ class ZenohBridge:
 
     def start(self) -> None:
         if self._running:
+            return
+        if not (self.enable_publish or self.enable_subscribe):
+            with self._lock:
+                self._running = False
+                self._ready = True
+                self._available = True
+                self._last_error = None
+            log.info("ZenohBridge disabled (publish and subscribe are both false)")
             return
         self._running = True
         try:
@@ -80,6 +89,14 @@ class ZenohBridge:
                 self.sub_keyexpr,
             )
         except Exception as e:
+            if isinstance(e, ModuleNotFoundError) and getattr(e, "name", "") == "zenoh":
+                with self._lock:
+                    self._running = False
+                    self._ready = False
+                    self._available = False
+                    self._last_error = "zenoh package is not installed; bridge disabled"
+                log.warning("ZenohBridge unavailable: zenoh package is not installed")
+                return
             with self._lock:
                 self._running = False
                 self._ready = False
@@ -116,7 +133,8 @@ class ZenohBridge:
     def status(self) -> Dict[str, Any]:
         with self._lock:
             return {
-                "enabled": True,
+                "enabled": self.enable_publish or self.enable_subscribe,
+                "available": self._available,
                 "running": self._running,
                 "ready": self._ready,
                 "publish_enabled": self.enable_publish,

@@ -30,6 +30,22 @@ Windows (PowerShell):
 pip install -r requirements.txt
 ```
 
+If `pip install -r requirements.txt` fails on `zenoh` (common on Windows/Python 3.14):
+```powershell
+# 1) Install Python 3.12 and create a dedicated venv
+py -3.12 -m venv .venv312
+.\.venv312\Scripts\Activate.ps1
+
+# 2) Install app deps except zenoh
+Get-Content requirements.txt | Where-Object { $_ -notmatch '^zenoh' } | Set-Content requirements_no_zenoh.txt
+pip install -r requirements_no_zenoh.txt
+
+# 3) Install Rust + MSVC build tools, then build zenoh Python client from source
+winget install -e --id Rustlang.Rustup
+winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+pip install git+https://github.com/eclipse-zenoh/zenoh-python.git
+```
+
 macOS/Linux:
 ```bash
 source .venv/bin/activate
@@ -56,6 +72,11 @@ docker run --rm -p 8000:8000 -v $(pwd)/data:/data --env-file .env tactical-cop-l
 Docker Compose (app + zenoh core service):
 ```bash
 docker compose up --build
+```
+
+Zenoh router only (run app locally):
+```bash
+docker compose up -d zenoh
 ```
 
 Production config template:
@@ -211,7 +232,21 @@ ADS-B feed payload shapes supported:
 - Subscribes for incoming updates on `ZENOH_SUB_KEYEXPR`.
 - Incoming zenoh updates are tagged with `meta.source == "zenoh"` and are not re-published.
 - On Windows with Python 3.14, `pip install zenoh` may not have a compatible wheel yet.
-  Use Python 3.12 (recommended) in `.venv` if zenoh install/import fails.
+  Use Python 3.12 (recommended) if zenoh install/import fails.
+- If your package index has no prebuilt zenoh wheel, use source install:
+  `pip install git+https://github.com/eclipse-zenoh/zenoh-python.git`
+
+## Track Display Check
+- Start zenoh router: `docker compose up -d zenoh`
+- Start app: `uvicorn main:app --host 127.0.0.1 --port 8000`
+- Verify bridge health: `GET /api/zenoh/status` should show `"ready": true`
+- Inject a sample track:
+  ```bash
+  curl -X POST http://127.0.0.1:8000/api/tracks \
+    -H "Content-Type: application/json" \
+    -d '{"uid":"DEMO-TRACK-001","side":"unknown","layer":"air","lat":37.6188,"lon":-122.3754,"meta":{"callsign":"DEMO123"}}'
+  ```
+- Confirm ingestion: `GET /api/tracks` includes `DEMO-TRACK-001` and the map renders it.
 
 ## FMV Notes
 - Browsers do not natively play RTSP directly.
