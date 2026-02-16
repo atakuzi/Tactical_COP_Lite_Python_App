@@ -15,6 +15,12 @@ services:
       COP_DB_PATH: /data/cop.db
       ENABLE_DOCS: "false"
       ZENOH_CONNECT: tcp/zenoh:7447
+      MAPBOX_ACCESS_TOKEN: ${MAPBOX_ACCESS_TOKEN:-}
+      MAPBOX_STYLE: ${MAPBOX_STYLE:-mapbox://styles/mapbox/dark-v11}
+      ADSB_FEED_URL: ${ADSB_FEED_URL:-}
+      ADSB_FEED_INTERVAL: ${ADSB_FEED_INTERVAL:-5}
+      ADSB_FEED_TIMEOUT_S: ${ADSB_FEED_TIMEOUT_S:-8}
+      ADSB_API_KEY: ${ADSB_API_KEY:-}
     ports:
       - "8000:8000"
     volumes:

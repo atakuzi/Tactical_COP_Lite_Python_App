@@ -1,9 +1,9 @@
 # Tactical COP Lite (Python)
 
-Lightweight tactical common operating picture (COP) application built with FastAPI + Leaflet.
+Lightweight tactical common operating picture (COP) application built with FastAPI + Mapbox GL JS.
 
 ## What It Does
-- Displays live tracks on a Leaflet map with MIL-STD-2525/APP-6 style symbols (`milsymbol`).
+- Displays live tracks on an interactive map with MIL-STD-2525/APP-6 style symbols (`milsymbol`).
 - Supports layer filtering (`friendly`, `enemy`, `fires`, `air`, `ew`, `other`).
 - Persists tracks in SQLite (`cop.db` by default) with last-known-position behavior.
 - Marks stale tracks in the UI (stale threshold is currently 90 seconds in `static/app.js`).
@@ -11,6 +11,7 @@ Lightweight tactical common operating picture (COP) application built with FastA
 - Uses zenoh as the core pub/sub layer for track updates.
 - Streams FMV as MJPEG (`/video/mjpeg`) from RTSP or a generated test feed.
 - Includes simulated FPV drone streams with telemetry overlays and COP track integration.
+- Uses Mapbox GL JS for the map display.
 
 ## Runtime + Dependencies
 - Python 3.10+ (3.12 recommended for production)
@@ -78,6 +79,7 @@ Health checks:
 - `GET /tak/cot/pull`: export all tracks as CoT XML events.
 - `GET /api/tak/status`: TAK bridge status/counters.
 - `GET /api/live_feed/status`: external live-feed poller status/counters.
+- `GET /api/adsb/status`: ADS-B poller status/counters.
 - `GET /api/zenoh/status`: zenoh bridge status/counters.
 - `GET /video/mjpeg`: MJPEG stream endpoint.
 - `GET /api/fpv/drones`: returns simulated FPV drone list and stream URLs, and updates drone tracks in COP.
@@ -108,11 +110,17 @@ Core:
 | `TRUSTED_HOSTS` | _(empty)_ | Comma-separated allowed hosts (enables host-header protection) |
 | `CORS_ORIGINS` | _(empty)_ | Comma-separated allowed CORS origins |
 | `MAX_META_BYTES` | `8192` | Max serialized `meta` payload size per track |
+| `MAPBOX_ACCESS_TOKEN` | _(empty)_ | Mapbox public access token used by frontend map |
+| `MAPBOX_STYLE` | `mapbox://styles/mapbox/dark-v11` | Mapbox style URL for the map |
 | `RTSP_URL` | _(empty)_ | RTSP source; when empty, app serves generated FMV test feed |
 | `FPV_SIM_ENABLED` | `true` | Enable simulated FPV drones and streams |
 | `LIVE_FEED_URL` | _(empty = disabled)_ | HTTP(S) JSON endpoint polled for live tracks |
 | `LIVE_FEED_INTERVAL` | `5` | Poll interval (seconds) for `LIVE_FEED_URL` |
 | `LIVE_FEED_TIMEOUT_S` | `8` | HTTP timeout (seconds) for external live feed |
+| `ADSB_FEED_URL` | _(empty = disabled)_ | ADS-B JSON endpoint URL (OpenSky, ADS-B Exchange-like, or dump1090-like) |
+| `ADSB_FEED_INTERVAL` | `5` | Poll interval (seconds) for `ADSB_FEED_URL` |
+| `ADSB_FEED_TIMEOUT_S` | `8` | HTTP timeout (seconds) for ADS-B API requests |
+| `ADSB_API_KEY` | _(empty)_ | Optional API key sent as `X-API-Key` for ADS-B endpoints |
 
 TAK bridge (enabled when `TAK_HOST` is set):
 
@@ -143,9 +151,12 @@ PowerShell examples:
 $env:COP_API_KEY="change-me"
 $env:TRUSTED_HOSTS="localhost,127.0.0.1"
 $env:ENABLE_DOCS="false"
+$env:MAPBOX_ACCESS_TOKEN="pk.your_public_token_here"
 $env:RTSP_URL="rtsp://user:pass@ip/stream"
 $env:LIVE_FEED_URL="http://127.0.0.1:9000/live_tracks"
 $env:LIVE_FEED_INTERVAL="5"
+$env:ADSB_FEED_URL="https://opensky-network.org/api/states/all"
+$env:ADSB_FEED_INTERVAL="5"
 $env:TAK_HOST="192.168.1.100"
 $env:TAK_PORT="8087"
 $env:TAK_CALLSIGN="MY-COP"
@@ -168,6 +179,24 @@ External live feed payload shape:
 }
 ```
 
+ADS-B feed payload shapes supported:
+```json
+{
+  "time": 1700000000,
+  "states": [
+    ["3c6444", "DLH2AB  ", "Germany", 1700000000, 1700000000, 8.6821, 50.1109, 10668.0, false, 230.0, 90.0]
+  ]
+}
+```
+
+```json
+{
+  "aircraft": [
+    { "hex": "a8c123", "flight": "UAL123", "lat": 37.6213, "lon": -122.3790, "track": 265.4, "gs": 410.2, "alt_baro": 32000 }
+  ]
+}
+```
+
 ## TAK Bridge Notes
 - Bridge starts automatically on app startup only if `TAK_HOST` is configured.
 - Receives CoT from TAK stream and upserts local tracks.
@@ -181,11 +210,20 @@ External live feed payload shape:
 - Publishes local track updates to `ZENOH_PUB_KEYEXPR`.
 - Subscribes for incoming updates on `ZENOH_SUB_KEYEXPR`.
 - Incoming zenoh updates are tagged with `meta.source == "zenoh"` and are not re-published.
+- On Windows with Python 3.14, `pip install zenoh` may not have a compatible wheel yet.
+  Use Python 3.12 (recommended) in `.venv` if zenoh install/import fails.
 
 ## FMV Notes
 - Browsers do not natively play RTSP directly.
 - App converts RTSP -> MJPEG for browser playback.
 - Without `RTSP_URL`, it emits a generated test pattern so UI can be demoed offline.
+
+## Map Notes
+- Map rendering prefers Mapbox GL JS, with `maplibre-gl` as runtime fallback.
+- If WebGL engines cannot initialize, the UI falls back to Leaflet (2D) with OSM tiles.
+- If both WebGL and Leaflet are unavailable, the UI falls back to an embedded OpenStreetMap iframe.
+- If `MAPBOX_ACCESS_TOKEN` is set, the app attempts `MAPBOX_STYLE`.
+- If token is missing, or Mapbox style load fails, the app falls back to OpenStreetMap raster tiles.
 
 ## Production Checklist
 - Set `COP_API_KEY` (protects write endpoints).

@@ -71,6 +71,10 @@ FPV_SIM_ENABLED = _env_bool("FPV_SIM_ENABLED", True)
 LIVE_FEED_URL = os.getenv("LIVE_FEED_URL", "").strip()
 LIVE_FEED_INTERVAL = _env_int("LIVE_FEED_INTERVAL", 5, minimum=2, maximum=300)
 LIVE_FEED_TIMEOUT_S = _env_int("LIVE_FEED_TIMEOUT_S", 8, minimum=2, maximum=60)
+ADSB_FEED_URL = os.getenv("ADSB_FEED_URL", "").strip()
+ADSB_FEED_INTERVAL = _env_int("ADSB_FEED_INTERVAL", 5, minimum=2, maximum=300)
+ADSB_FEED_TIMEOUT_S = _env_int("ADSB_FEED_TIMEOUT_S", 8, minimum=2, maximum=60)
+ADSB_API_KEY = os.getenv("ADSB_API_KEY", "").strip()
 MAX_META_BYTES = _env_int("MAX_META_BYTES", 8192, minimum=256, maximum=1000000)
 
 # Optional access control for write endpoints.
@@ -80,6 +84,8 @@ COP_API_KEY = os.getenv("COP_API_KEY", "").strip()
 ENABLE_DOCS = _env_bool("ENABLE_DOCS", True)
 TRUSTED_HOSTS = _env_csv("TRUSTED_HOSTS")
 CORS_ORIGINS = _env_csv("CORS_ORIGINS")
+MAPBOX_ACCESS_TOKEN = os.getenv("MAPBOX_ACCESS_TOKEN", "").strip()
+MAPBOX_STYLE = os.getenv("MAPBOX_STYLE", "mapbox://styles/mapbox/dark-v11").strip() or "mapbox://styles/mapbox/dark-v11"
 
 # TAK Server bridge (opt-in: set TAK_HOST to enable).
 TAK_HOST = os.getenv("TAK_HOST", "").strip()
@@ -326,6 +332,204 @@ class LiveFeedPoller:
                 self._last_error = str(e)
 
 
+def _as_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_str(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _extract_adsb_tracks(payload: Any) -> List[Dict[str, Any]]:
+    # OpenSky: {"time": ..., "states": [[icao24, callsign, ..., lon, lat, ...], ...]}
+    if isinstance(payload, dict) and isinstance(payload.get("states"), list):
+        tracks: List[Dict[str, Any]] = []
+        states = payload.get("states", [])
+        generated_at = payload.get("time")
+        for state in states:
+            if not isinstance(state, list) or len(state) < 8:
+                continue
+            icao24 = _as_str(state[0]).lower()
+            callsign = _as_str(state[1])
+            lon = _as_float(state[5])
+            lat = _as_float(state[6])
+            if not icao24 or lat is None or lon is None:
+                continue
+            meta = {
+                "source": "adsb",
+                "provider": "opensky",
+                "icao24": icao24,
+                "callsign": callsign or f"{icao24.upper()}",
+                "origin_country": _as_str(state[2]),
+                "time_position": state[3],
+                "last_contact": state[4],
+                "baro_altitude_m": _as_float(state[7]),
+                "on_ground": bool(state[8]) if len(state) > 8 and state[8] is not None else None,
+                "velocity_mps": _as_float(state[9]) if len(state) > 9 else None,
+                "heading_deg": _as_float(state[10]) if len(state) > 10 else None,
+                "vertical_rate_mps": _as_float(state[11]) if len(state) > 11 else None,
+                "geo_altitude_m": _as_float(state[13]) if len(state) > 13 else None,
+                "squawk": _as_str(state[14]) if len(state) > 14 else "",
+                "generated_at": generated_at,
+            }
+            tracks.append(
+                {
+                    "uid": f"ADSB-{icao24}",
+                    "side": "unknown",
+                    "layer": "air",
+                    "lat": lat,
+                    "lon": lon,
+                    "meta": {k: v for k, v in meta.items() if v not in ("", None)},
+                }
+            )
+        return tracks
+
+    # ADS-B Exchange / adsb.fi / dump1090-like: {"aircraft":[...]} or {"ac":[...]}
+    records: List[Any] = []
+    if isinstance(payload, dict):
+        if isinstance(payload.get("aircraft"), list):
+            records = payload.get("aircraft", [])
+        elif isinstance(payload.get("ac"), list):
+            records = payload.get("ac", [])
+    elif isinstance(payload, list):
+        records = payload
+
+    tracks = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        icao24 = _as_str(rec.get("hex") or rec.get("icao") or rec.get("icao24")).lower()
+        lat = _as_float(rec.get("lat"))
+        lon = _as_float(rec.get("lon"))
+        if not icao24 or lat is None or lon is None:
+            continue
+        callsign = (
+            _as_str(rec.get("flight"))
+            or _as_str(rec.get("callsign"))
+            or _as_str(rec.get("r"))
+            or f"{icao24.upper()}"
+        )
+        meta = {
+            "source": "adsb",
+            "provider": _as_str(rec.get("dbFlags")) and "adsb" or "generic_adsb",
+            "icao24": icao24,
+            "callsign": callsign,
+            "registration": _as_str(rec.get("r") or rec.get("reg")),
+            "squawk": _as_str(rec.get("squawk")),
+            "category": _as_str(rec.get("category")),
+            "type": _as_str(rec.get("type")),
+            "emergency": _as_str(rec.get("emergency")),
+            "heading_deg": _as_float(rec.get("track") or rec.get("true_heading") or rec.get("nav_heading")),
+            "ground_speed_kt": _as_float(rec.get("gs") or rec.get("ground_speed")),
+            "baro_altitude_ft": _as_float(rec.get("alt_baro") or rec.get("baro_altitude")),
+            "geo_altitude_ft": _as_float(rec.get("alt_geom") or rec.get("geom_altitude")),
+            "seen_s": _as_float(rec.get("seen") or rec.get("seen_pos")),
+        }
+        tracks.append(
+            {
+                "uid": f"ADSB-{icao24}",
+                "side": "unknown",
+                "layer": "air",
+                "lat": lat,
+                "lon": lon,
+                "meta": {k: v for k, v in meta.items() if v not in ("", None)},
+            }
+        )
+    return tracks
+
+
+class ADSBPoller:
+    def __init__(self, url: str, interval_s: int):
+        self.url = url
+        self.interval_s = interval_s
+        self._lock = threading.Lock()
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._last_poll_at: Optional[str] = None
+        self._last_success_at: Optional[str] = None
+        self._last_error: Optional[str] = None
+        self._ingested_total = 0
+        self._last_batch_count = 0
+
+    def start(self) -> None:
+        if self._running or not self.url:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True, name="adsb-poller")
+        self._thread.start()
+        log.info("ADS-B poller started for %s", self.url)
+
+    def stop(self) -> None:
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=3)
+
+    def status(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "enabled": bool(self.url),
+                "url": self.url,
+                "interval_s": self.interval_s,
+                "last_poll_at": self._last_poll_at,
+                "last_success_at": self._last_success_at,
+                "last_error": self._last_error,
+                "last_batch_count": self._last_batch_count,
+                "ingested_total": self._ingested_total,
+            }
+
+    def _run(self) -> None:
+        while self._running:
+            self._poll_once()
+            for _ in range(self.interval_s):
+                if not self._running:
+                    break
+                time.sleep(1)
+
+    def _poll_once(self) -> None:
+        with self._lock:
+            self._last_poll_at = utc_now_iso()
+        try:
+            headers = {
+                "Accept": "application/json",
+                "User-Agent": "tactical-cop-lite/1.0",
+            }
+            if ADSB_API_KEY:
+                headers["X-API-Key"] = ADSB_API_KEY
+
+            req = urllib.request.Request(self.url, headers=headers)
+            with urllib.request.urlopen(req, timeout=ADSB_FEED_TIMEOUT_S) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+
+            parsed_tracks = _extract_adsb_tracks(payload)
+            ingested = 0
+            for raw in parsed_tracks:
+                t = TrackIn.model_validate(raw)
+                _validate_side_layer(t.side, t.layer)
+                meta = dict(t.meta or {})
+                meta.setdefault("source", "adsb")
+                upsert_track(t.uid, t.side, t.layer, t.lat, t.lon, meta)
+                ingested += 1
+
+            with self._lock:
+                self._last_success_at = utc_now_iso()
+                self._last_error = None
+                self._last_batch_count = ingested
+                self._ingested_total += ingested
+        except ValidationError as e:
+            with self._lock:
+                self._last_error = f"Validation error: {e.errors()[0].get('msg', 'invalid payload')}"
+        except Exception as e:
+            with self._lock:
+                self._last_error = str(e)
+
+
 class FrameSource:
     def __init__(self, rtsp_url: str):
         self.rtsp_url = rtsp_url
@@ -535,6 +739,10 @@ live_feed_poller: Optional[LiveFeedPoller] = None
 if LIVE_FEED_URL:
     live_feed_poller = LiveFeedPoller(url=LIVE_FEED_URL, interval_s=LIVE_FEED_INTERVAL)
 
+adsb_poller: Optional[ADSBPoller] = None
+if ADSB_FEED_URL:
+    adsb_poller = ADSBPoller(url=ADSB_FEED_URL, interval_s=ADSB_FEED_INTERVAL)
+
 zenoh_bridge = ZenohBridge(
     pub_keyexpr=ZENOH_PUB_KEYEXPR,
     sub_keyexpr=ZENOH_SUB_KEYEXPR,
@@ -553,6 +761,8 @@ async def lifespan(_: FastAPI):
         tak_bridge.start()
     if live_feed_poller:
         live_feed_poller.start()
+    if adsb_poller:
+        adsb_poller.start()
     log.info("Application started")
     yield
     frame_source.stop()
@@ -560,6 +770,8 @@ async def lifespan(_: FastAPI):
         tak_bridge.stop()
     if live_feed_poller:
         live_feed_poller.stop()
+    if adsb_poller:
+        adsb_poller.stop()
     zenoh_bridge.stop()
     log.info("Application stopped")
 
@@ -609,7 +821,15 @@ app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), na
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request, "app_title": APP_TITLE})
+    return templates.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "app_title": APP_TITLE,
+            "mapbox_access_token": MAPBOX_ACCESS_TOKEN,
+            "mapbox_style": MAPBOX_STYLE,
+        },
+    )
 
 
 @app.get("/healthz")
@@ -626,7 +846,7 @@ def readyz():
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"db unavailable: {e}")
     z_status = zenoh_bridge.status()
-    if not z_status.get("ready"):
+    if z_status.get("enabled") and z_status.get("available", True) and not z_status.get("ready"):
         reason = z_status.get("last_error") or "zenoh not ready"
         raise HTTPException(status_code=503, detail=f"zenoh unavailable: {reason}")
     return {"status": "ready", "time": utc_now_iso()}
@@ -741,6 +961,13 @@ def api_live_feed_status():
     if live_feed_poller is None:
         return {"enabled": False, "reason": "LIVE_FEED_URL not configured"}
     return live_feed_poller.status()
+
+
+@app.get("/api/adsb/status")
+def api_adsb_status():
+    if adsb_poller is None:
+        return {"enabled": False, "reason": "ADSB_FEED_URL not configured"}
+    return adsb_poller.status()
 
 
 @app.get("/api/zenoh/status")

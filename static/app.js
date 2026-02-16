@@ -6,19 +6,46 @@ const mjpegEl = document.getElementById("mjpeg");
 const fpvSelectEl = document.getElementById("fpv-select");
 const fpvListEl = document.getElementById("fpv-list");
 
-const map = L.map("map", { zoomControl: true }).setView([50.1109, 8.6821], 6);
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  maxZoom: 19,
-  attribution: "&copy; OpenStreetMap",
-}).addTo(map);
+const MAPBOX_TOKEN = window.MAPBOX_ACCESS_TOKEN || "";
+const MAPBOX_STYLE = window.MAPBOX_STYLE || "mapbox://styles/mapbox/dark-v11";
 
-const layers = {
-  friendly: L.layerGroup().addTo(map),
-  enemy: L.layerGroup().addTo(map),
-  fires: L.layerGroup().addTo(map),
-  air: L.layerGroup().addTo(map),
-  ew: L.layerGroup().addTo(map),
-  other: L.layerGroup().addTo(map),
+let map = null;
+let glLib = null;
+let mapEngine = null;
+let leafletLayers = null;
+
+const OSM_RASTER_FALLBACK_STYLE = {
+  version: 8,
+  sources: {
+    "osm-tiles": {
+      type: "raster",
+      tiles: [
+        "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      ],
+      tileSize: 256,
+      attribution: "(c) OpenStreetMap contributors",
+    },
+  },
+  layers: [
+    {
+      id: "osm-base",
+      type: "raster",
+      source: "osm-tiles",
+      minzoom: 0,
+      maxzoom: 19,
+    },
+  ],
+};
+
+const layerVisibility = {
+  friendly: true,
+  enemy: true,
+  fires: true,
+  air: true,
+  ew: true,
+  other: true,
 };
 
 const markersByUid = new Map();
@@ -44,48 +71,250 @@ const fpvState = {
 let sseConnected = false;
 let sseRetryTimer = null;
 
+function initMap() {
+  const clearMarkerStates = () => {
+    // Markers are bound to a specific map instance; force re-attach after engine/map swaps.
+    for (const markerState of markersByUid.values()) {
+      markerState.visible = false;
+      if (markerState.groupName) markerState.groupName = markerState.layer || markerState.groupName;
+    }
+  };
+
+  const initIframeFallback = (reason) => {
+    const mapEl = document.getElementById("map");
+    if (!mapEl) {
+      statusEl.textContent = `Map failed to initialize (${reason})`;
+      return;
+    }
+    mapEngine = "iframe";
+    map = null;
+    mapEl.innerHTML = "";
+    const iframe = document.createElement("iframe");
+    iframe.src = "https://www.openstreetmap.org/export/embed.html?bbox=5.5%2C47.0%2C15.5%2C53.5&layer=mapnik";
+    iframe.title = "Map fallback";
+    iframe.style.width = "100%";
+    iframe.style.height = "100%";
+    iframe.style.border = "0";
+    iframe.loading = "lazy";
+    mapEl.appendChild(iframe);
+    statusEl.textContent = `Map initialized with iframe fallback (${reason})`;
+  };
+
+  const initLeafletFallback = (reason) => {
+    if (!window.L) {
+      initIframeFallback(`${reason}; Leaflet unavailable`);
+      return;
+    }
+    mapEngine = "leaflet";
+    map = L.map("map", { zoomControl: true }).setView([50.1109, 8.6821], 6);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: "(c) OpenStreetMap contributors",
+    }).addTo(map);
+    leafletLayers = {
+      friendly: L.layerGroup().addTo(map),
+      enemy: L.layerGroup().addTo(map),
+      fires: L.layerGroup().addTo(map),
+      air: L.layerGroup().addTo(map),
+      ew: L.layerGroup().addTo(map),
+      other: L.layerGroup().addTo(map),
+    };
+    statusEl.textContent = `Map initialized with Leaflet fallback (${reason})`;
+  };
+
+  const hasMapboxRuntime = !!window.mapboxgl;
+  const hasMapLibreRuntime = !!window.maplibregl;
+
+  // Prefer Mapbox only when a token is available; otherwise prefer MapLibre for token-free rendering.
+  if (MAPBOX_TOKEN && hasMapboxRuntime) {
+    glLib = window.mapboxgl;
+    window.mapboxgl.accessToken = MAPBOX_TOKEN;
+  } else if (hasMapLibreRuntime) {
+    glLib = window.maplibregl;
+  } else if (hasMapboxRuntime) {
+    glLib = window.mapboxgl;
+  } else {
+    glLib = null;
+  }
+
+  if (!glLib) {
+    initLeafletFallback("WebGL engine unavailable");
+    return;
+  }
+
+  const usingToken = glLib === window.mapboxgl && !!MAPBOX_TOKEN;
+
+  try {
+    mapEngine = "gl";
+    map = new glLib.Map({
+      container: "map",
+      style: usingToken ? MAPBOX_STYLE : OSM_RASTER_FALLBACK_STYLE,
+      center: [8.6821, 50.1109],
+      zoom: 6,
+    });
+    map.addControl(new glLib.NavigationControl(), "top-right");
+  } catch (e) {
+    map = null;
+    mapEngine = null;
+    initLeafletFallback("WebGL initialization failed");
+    clearMarkerStates();
+    return;
+  }
+
+  let loaded = false;
+  map.once("load", () => {
+    loaded = true;
+  });
+
+  if (usingToken) {
+    let downgraded = false;
+    const downgradeToOsm = (reason) => {
+      if (downgraded || !map) return;
+      downgraded = true;
+      const center = map.getCenter();
+      const zoom = map.getZoom();
+      map.remove();
+      map = new glLib.Map({
+        container: "map",
+        style: OSM_RASTER_FALLBACK_STYLE,
+        center: [center.lng, center.lat],
+        zoom,
+      });
+      map.addControl(new glLib.NavigationControl(), "top-right");
+      clearMarkerStates();
+      statusEl.textContent = `Mapbox style unavailable; using OpenStreetMap fallback (${reason})`;
+      refresh();
+    };
+
+    map.on("error", () => {
+      if (!loaded) downgradeToOsm("style error");
+    });
+    setTimeout(() => {
+      if (!loaded) downgradeToOsm("timeout");
+    }, 6000);
+  } else {
+    statusEl.textContent = "Map initialized with OpenStreetMap fallback";
+  }
+}
+
 function iconFor(track) {
   const aff = AFFILIATION[track.side] || "U";
   const sidcTemplate = track.meta?.sidc || LAYER_SIDC[track.layer] || LAYER_SIDC.other;
   const sidc = sidcTemplate[0] + aff + sidcTemplate.slice(2);
 
   const sym = new ms.Symbol(sidc, { size: SYM_SIZE });
+  const size = sym.getSize();
   const anchor = sym.getAnchor();
 
-  return L.divIcon({
-    className: "",
-    html: sym.asSVG(),
-    iconSize: [sym.getSize().width, sym.getSize().height],
-    iconAnchor: [anchor.x, anchor.y],
-  });
+  return {
+    svg: sym.asSVG(),
+    offset: [Math.round(size.width / 2 - anchor.x), Math.round(size.height / 2 - anchor.y)],
+  };
 }
 
 function setMarker(track) {
-  const latlng = [track.lat, track.lon];
-  const layerName = track.layer || "other";
-  const group = layers[layerName] || layers.friendly;
+  if (!map) return;
 
-  let marker = markersByUid.get(track.uid);
-  if (!marker) {
-    marker = L.marker(latlng, { icon: iconFor(track) });
-    marker.addTo(group);
-    markersByUid.set(track.uid, marker);
-  } else {
-    marker.setLatLng(latlng);
-    marker.setIcon(iconFor(track));
-    Object.values(layers).forEach((g) => {
-      try {
-        g.removeLayer(marker);
-      } catch (e) {
-        // Leaflet layer was not in this group.
-      }
+  const layerName = track.layer || "other";
+  const markerState = markersByUid.get(track.uid);
+  const icon = iconFor(track);
+  const popupHtml = `<b>${track.meta?.callsign || track.uid}</b><br/>${track.side} | ${layerName}<br/>Updated: ${new Date(track.updated_at).toLocaleString()}`;
+
+  if (mapEngine === "leaflet") {
+    const group = (leafletLayers && leafletLayers[layerName]) || (leafletLayers && leafletLayers.other);
+    const leafletIcon = L.divIcon({
+      className: "cop-marker",
+      html: icon.svg,
+      iconSize: [SYM_SIZE, SYM_SIZE],
+      iconAnchor: [SYM_SIZE / 2, SYM_SIZE / 2],
+      popupAnchor: [0, -SYM_SIZE / 2],
     });
-    marker.addTo(group);
+
+    if (!markerState) {
+      const marker = L.marker([track.lat, track.lon], { icon: leafletIcon }).bindPopup(popupHtml);
+      const state = { marker, layer: layerName, groupName: layerName, visible: false, engine: "leaflet" };
+      markersByUid.set(track.uid, state);
+      applyMarkerVisibility(state, layerName);
+      return;
+    }
+
+    markerState.layer = layerName;
+    markerState.marker.setLatLng([track.lat, track.lon]);
+    markerState.marker.setIcon(leafletIcon);
+    markerState.marker.bindPopup(popupHtml);
+    applyMarkerVisibility(markerState, layerName);
+    return;
   }
 
-  const cs = track.meta?.callsign || track.uid;
-  const updated = new Date(track.updated_at).toLocaleString();
-  marker.bindPopup(`<b>${cs}</b><br/>${track.side} | ${track.layer}<br/>Updated: ${updated}`);
+  if (!markerState) {
+    const el = document.createElement("div");
+    el.className = "cop-marker";
+    el.innerHTML = icon.svg;
+
+    const marker = new glLib.Marker({ element: el, offset: icon.offset })
+      .setLngLat([track.lon, track.lat])
+      .setPopup(new glLib.Popup({ offset: 12 }).setHTML(popupHtml));
+
+    const state = { marker, element: el, layer: layerName, visible: false };
+    markersByUid.set(track.uid, state);
+    applyMarkerVisibility(state, layerName);
+    return;
+  }
+
+  markerState.layer = layerName;
+  markerState.element.innerHTML = icon.svg;
+  markerState.marker.setOffset(icon.offset);
+  markerState.marker.setLngLat([track.lon, track.lat]);
+  markerState.marker.setPopup(new glLib.Popup({ offset: 12 }).setHTML(popupHtml));
+  applyMarkerVisibility(markerState, layerName);
+}
+
+function applyMarkerVisibility(markerState, layerName) {
+  if (!map) return;
+  const shouldShow = layerVisibility[layerName] !== false;
+  if (mapEngine === "leaflet" && markerState.engine === "leaflet") {
+    const targetGroup = (leafletLayers && leafletLayers[layerName]) || (leafletLayers && leafletLayers.other);
+    const currentGroup =
+      (leafletLayers && leafletLayers[markerState.groupName]) ||
+      targetGroup;
+
+    if (shouldShow && !markerState.visible) {
+      markerState.marker.addTo(targetGroup);
+      markerState.visible = true;
+      markerState.groupName = layerName;
+    } else if (shouldShow && markerState.visible && markerState.groupName !== layerName) {
+      currentGroup.removeLayer(markerState.marker);
+      markerState.marker.addTo(targetGroup);
+      markerState.groupName = layerName;
+    } else if (!shouldShow && markerState.visible) {
+      currentGroup.removeLayer(markerState.marker);
+      markerState.visible = false;
+      markerState.groupName = layerName;
+    }
+    return;
+  }
+  if (shouldShow && !markerState.visible) {
+    markerState.marker.addTo(map);
+    markerState.visible = true;
+  } else if (!shouldShow && markerState.visible) {
+    markerState.marker.remove();
+    markerState.visible = false;
+  }
+}
+
+function applyAllLayerVisibility() {
+  for (const markerState of markersByUid.values()) {
+    applyMarkerVisibility(markerState, markerState.layer);
+  }
+}
+
+function flyToPoint(lat, lon, minZoom = 12) {
+  if (!map) return;
+  if (mapEngine === "leaflet") {
+    map.flyTo([lat, lon], Math.max(map.getZoom(), minZoom));
+    return;
+  }
+  map.flyTo({ center: [lon, lat], zoom: Math.max(map.getZoom(), minZoom) });
 }
 
 function updateTrackList(tracks, serverTimeIso) {
@@ -109,22 +338,27 @@ function updateTrackList(tracks, serverTimeIso) {
       <div class="bp5-text-muted track-meta">${t.layer} | age ${ageSec.toFixed(0)}s</div>
       <div class="bp5-text-muted track-meta">${t.lat.toFixed(4)}, ${t.lon.toFixed(4)}</div>
     `;
-    div.addEventListener("click", () => map.setView([t.lat, t.lon], Math.max(map.getZoom(), 12)));
+    div.addEventListener("click", () => {
+      flyToPoint(t.lat, t.lon, 12);
+    });
     tracklistEl.appendChild(div);
   }
 }
 
 function reconcileMarkers(tracks) {
   const liveUids = new Set(tracks.map((t) => t.uid));
-  for (const [uid, marker] of markersByUid.entries()) {
+  for (const [uid, markerState] of markersByUid.entries()) {
     if (liveUids.has(uid)) continue;
-    Object.values(layers).forEach((g) => {
-      try {
-        g.removeLayer(marker);
-      } catch (e) {
-        // Marker was not in this layer.
+    if (mapEngine === "leaflet" && markerState.engine === "leaflet") {
+      const group =
+        (leafletLayers && leafletLayers[markerState.groupName]) ||
+        (leafletLayers && leafletLayers.other);
+      if (group && markerState.visible) {
+        group.removeLayer(markerState.marker);
       }
-    });
+    } else {
+      markerState.marker.remove();
+    }
     markersByUid.delete(uid);
   }
 }
@@ -183,7 +417,6 @@ function connectTrackStream() {
         connectTrackStream();
       }, 2500);
     }
-    // Keep UI moving while stream is down.
     refresh();
   };
 }
@@ -225,7 +458,7 @@ function renderFpvControls() {
     btn.addEventListener("click", () => {
       fpvSelectEl.value = d.stream_url;
       syncStreamSelection();
-      map.setView([d.lat, d.lon], Math.max(map.getZoom(), 12));
+      flyToPoint(d.lat, d.lon, 12);
     });
     fpvListEl.appendChild(btn);
   }
@@ -245,6 +478,7 @@ async function refreshFpvDrones() {
   }
 }
 
+initMap();
 connectTrackStream();
 setInterval(refreshFpvDrones, 3000);
 refreshFpvDrones();
@@ -252,14 +486,19 @@ refreshFpvDrones();
 document.querySelectorAll('input[type="checkbox"][data-layer]').forEach((cb) => {
   cb.addEventListener("change", () => {
     const name = cb.getAttribute("data-layer");
-    const group = layers[name];
-    if (!group) return;
-    if (cb.checked) group.addTo(map);
-    else map.removeLayer(group);
+    layerVisibility[name] = cb.checked;
+    applyAllLayerVisibility();
   });
 });
 
-document.getElementById("btn-center").addEventListener("click", () => map.setView([50.1109, 8.6821], 6));
+document.getElementById("btn-center").addEventListener("click", () => {
+  if (!map) return;
+  if (mapEngine === "leaflet") {
+    map.flyTo([50.1109, 8.6821], 6);
+    return;
+  }
+  map.flyTo({ center: [8.6821, 50.1109], zoom: 6 });
+});
 
 document.getElementById("btn-demo").addEventListener("click", async () => {
   const demo = [
@@ -315,3 +554,4 @@ popBtn.addEventListener("click", () => {
   const src = encodeURIComponent(fpvState.selectedStream || DEFAULT_VIDEO_STREAM);
   window.open(`/video/view?src=${src}`, "_blank");
 });
+
