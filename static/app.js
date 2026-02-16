@@ -41,6 +41,8 @@ const fpvState = {
   drones: [],
   byUid: new Map(),
 };
+let sseConnected = false;
+let sseRetryTimer = null;
 
 function iconFor(track) {
   const aff = AFFILIATION[track.side] || "U";
@@ -112,17 +114,78 @@ function updateTrackList(tracks, serverTimeIso) {
   }
 }
 
+function reconcileMarkers(tracks) {
+  const liveUids = new Set(tracks.map((t) => t.uid));
+  for (const [uid, marker] of markersByUid.entries()) {
+    if (liveUids.has(uid)) continue;
+    Object.values(layers).forEach((g) => {
+      try {
+        g.removeLayer(marker);
+      } catch (e) {
+        // Marker was not in this layer.
+      }
+    });
+    markersByUid.delete(uid);
+  }
+}
+
+function applyTracksPayload(data, transport = "poll") {
+  const tracks = data.tracks || [];
+  const serverTime = data.server_time || new Date().toISOString();
+  statusEl.textContent = `Tracks: ${tracks.length} | ${transport.toUpperCase()} | Server: ${new Date(serverTime).toLocaleTimeString()}`;
+  for (const t of tracks) setMarker(t);
+  reconcileMarkers(tracks);
+  updateTrackList(tracks, serverTime);
+}
+
 async function refresh() {
   try {
     const res = await fetch("/api/tracks");
     const data = await res.json();
-    const tracks = data.tracks || [];
-    statusEl.textContent = `Tracks: ${tracks.length} | Server: ${new Date(data.server_time).toLocaleTimeString()}`;
-    for (const t of tracks) setMarker(t);
-    updateTrackList(tracks, data.server_time);
+    applyTracksPayload(data, "poll");
   } catch (e) {
     statusEl.textContent = "Disconnected - showing last known positions";
   }
+}
+
+function connectTrackStream() {
+  if (!window.EventSource) {
+    statusEl.textContent = "EventSource unsupported - polling mode";
+    setInterval(refresh, 1500);
+    refresh();
+    return;
+  }
+
+  const es = new EventSource("/api/tracks/stream");
+  es.addEventListener("tracks", (ev) => {
+    try {
+      const data = JSON.parse(ev.data);
+      applyTracksPayload(data, "live");
+      sseConnected = true;
+      if (sseRetryTimer) {
+        clearTimeout(sseRetryTimer);
+        sseRetryTimer = null;
+      }
+    } catch (e) {
+      // Ignore bad event payload and keep stream alive.
+    }
+  });
+
+  es.onerror = () => {
+    if (sseConnected) {
+      statusEl.textContent = "Live stream interrupted - retrying";
+    }
+    es.close();
+    sseConnected = false;
+    if (!sseRetryTimer) {
+      sseRetryTimer = setTimeout(() => {
+        sseRetryTimer = null;
+        connectTrackStream();
+      }, 2500);
+    }
+    // Keep UI moving while stream is down.
+    refresh();
+  };
 }
 
 function syncStreamSelection() {
@@ -182,8 +245,7 @@ async function refreshFpvDrones() {
   }
 }
 
-setInterval(refresh, 1500);
-refresh();
+connectTrackStream();
 setInterval(refreshFpvDrones, 3000);
 refreshFpvDrones();
 

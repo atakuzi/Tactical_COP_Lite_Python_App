@@ -44,11 +44,13 @@ Open:
 
 ## API
 - `GET /api/tracks`: list all tracks + server UTC time.
+- `GET /api/tracks/stream`: Server-Sent Events (SSE) stream with live track snapshots (`event: tracks`).
 - `POST /api/tracks`: upsert one track (validates `side` and `layer`).
 - `POST /ingest/bft`: ingest batch JSON (`{"tracks":[...]}`).
 - `POST /tak/cot`: ingest one CoT XML event.
 - `GET /tak/cot/pull`: export all tracks as CoT XML events.
 - `GET /api/tak/status`: TAK bridge status/counters.
+- `GET /api/live_feed/status`: external live-feed poller status/counters.
 - `GET /video/mjpeg`: MJPEG stream endpoint.
 - `GET /api/fpv/drones`: returns simulated FPV drone list and stream URLs, and updates drone tracks in COP.
 - `GET /video/fpv/{drone_uid}.mjpeg`: simulated per-drone FPV MJPEG stream.
@@ -71,6 +73,8 @@ Core:
 | `COP_DB_PATH` | `cop.db` | SQLite DB file path |
 | `RTSP_URL` | _(empty)_ | RTSP source; when empty, app serves generated FMV test feed |
 | `FPV_SIM_ENABLED` | `true` | Enable simulated FPV drones and streams |
+| `LIVE_FEED_URL` | _(empty = disabled)_ | HTTP(S) JSON endpoint polled for live tracks |
+| `LIVE_FEED_INTERVAL` | `5` | Poll interval (seconds) for `LIVE_FEED_URL` |
 
 TAK bridge (enabled when `TAK_HOST` is set):
 
@@ -88,9 +92,27 @@ TAK bridge (enabled when `TAK_HOST` is set):
 PowerShell examples:
 ```powershell
 $env:RTSP_URL="rtsp://user:pass@ip/stream"
+$env:LIVE_FEED_URL="http://127.0.0.1:9000/live_tracks"
+$env:LIVE_FEED_INTERVAL="5"
 $env:TAK_HOST="192.168.1.100"
 $env:TAK_PORT="8087"
 $env:TAK_CALLSIGN="MY-COP"
+```
+
+External live feed payload shape:
+```json
+{
+  "tracks": [
+    {
+      "uid": "LIVE-001",
+      "side": "friendly",
+      "layer": "air",
+      "lat": 50.12,
+      "lon": 8.67,
+      "meta": { "callsign": "EAGLE 1" }
+    }
+  ]
+}
 ```
 
 ## TAK Bridge Notes

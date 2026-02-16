@@ -5,9 +5,12 @@ import time
 import math
 import sqlite3
 import threading
+import asyncio
+import urllib.request
+import urllib.error
 from html import escape
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Any, Dict, List
 
 import numpy as np
@@ -24,6 +27,8 @@ APP_TITLE = "Tactical COP Lite"
 DB_PATH = os.getenv("COP_DB_PATH", "cop.db")
 RTSP_URL = os.getenv("RTSP_URL", "").strip()
 FPV_SIM_ENABLED = os.getenv("FPV_SIM_ENABLED", "true").strip().lower() in ("1", "true", "yes")
+LIVE_FEED_URL = os.getenv("LIVE_FEED_URL", "").strip()
+LIVE_FEED_INTERVAL = max(2, int(os.getenv("LIVE_FEED_INTERVAL", "5")))
 
 # TAK Server bridge (opt-in: set TAK_HOST to enable)
 TAK_HOST = os.getenv("TAK_HOST", "").strip()
@@ -37,6 +42,13 @@ TAK_PUSH_INTERVAL = int(os.getenv("TAK_PUSH_INTERVAL", "30"))
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _validate_side_layer(side: str, layer: str) -> None:
+    if side not in {"friendly", "enemy", "neutral", "unknown"}:
+        raise HTTPException(status_code=400, detail="Invalid side")
+    if layer not in {"friendly", "enemy", "fires", "air", "ew", "other"}:
+        raise HTTPException(status_code=400, detail="Invalid layer")
 
 def init_db() -> None:
     conn = sqlite3.connect(DB_PATH)
@@ -105,14 +117,93 @@ class TrackIn(BaseModel):
 class BFTBatch(BaseModel):
     tracks: List[TrackIn]
 
+
+class LiveFeedPoller:
+    def __init__(self, url: str, interval_s: int):
+        self.url = url
+        self.interval_s = interval_s
+        self._lock = threading.Lock()
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._last_poll_at: Optional[str] = None
+        self._last_success_at: Optional[str] = None
+        self._last_error: Optional[str] = None
+        self._ingested_total = 0
+
+    def start(self):
+        if self._running or not self.url:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True, name="live-feed-poller")
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=3)
+
+    def status(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "enabled": bool(self.url),
+                "url": self.url,
+                "interval_s": self.interval_s,
+                "last_poll_at": self._last_poll_at,
+                "last_success_at": self._last_success_at,
+                "last_error": self._last_error,
+                "ingested_total": self._ingested_total,
+            }
+
+    def _run(self):
+        while self._running:
+            self._poll_once()
+            for _ in range(self.interval_s):
+                if not self._running:
+                    break
+                time.sleep(1)
+
+    def _poll_once(self):
+        with self._lock:
+            self._last_poll_at = utc_now_iso()
+        try:
+            req = urllib.request.Request(self.url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+
+            if isinstance(payload, list):
+                raw_tracks = payload
+            else:
+                raw_tracks = payload.get("tracks", [])
+
+            ingested = 0
+            for raw in raw_tracks:
+                t = TrackIn.model_validate(raw)
+                _validate_side_layer(t.side, t.layer)
+                meta = dict(t.meta or {})
+                meta.setdefault("source", "live_feed")
+                upsert_track(t.uid, t.side, t.layer, t.lat, t.lon, meta)
+                ingested += 1
+
+            with self._lock:
+                self._last_success_at = utc_now_iso()
+                self._last_error = None
+                self._ingested_total += ingested
+        except Exception as e:
+            with self._lock:
+                self._last_error = str(e)
+
 @asynccontextmanager
 async def lifespan(app):
     init_db()
     if tak_bridge:
         tak_bridge.start()
+    if live_feed_poller:
+        live_feed_poller.start()
     yield
     if tak_bridge:
         tak_bridge.stop()
+    if live_feed_poller:
+        live_feed_poller.stop()
 
 app = FastAPI(title=APP_TITLE, lifespan=lifespan)
 
@@ -128,19 +219,36 @@ def index(request: Request):
 def api_tracks():
     return {"tracks": list_tracks(), "server_time": utc_now_iso()}
 
+
+@app.get("/api/tracks/stream")
+async def api_tracks_stream(request: Request):
+    async def stream():
+        while True:
+            if await request.is_disconnected():
+                break
+            payload = {"tracks": list_tracks(), "server_time": utc_now_iso()}
+            yield f"event: tracks\ndata: {json.dumps(payload)}\n\n"
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
+
 @app.post("/api/tracks")
 def api_upsert(track: TrackIn):
-    # Basic validation for demo (keep simple)
-    if track.side not in {"friendly", "enemy", "neutral", "unknown"}:
-        raise HTTPException(status_code=400, detail="Invalid side")
-    if track.layer not in {"friendly", "enemy", "fires", "air", "ew", "other"}:
-        raise HTTPException(status_code=400, detail="Invalid layer")
+    _validate_side_layer(track.side, track.layer)
     upsert_track(track.uid, track.side, track.layer, track.lat, track.lon, track.meta)
     return {"ok": True, "updated_at": utc_now_iso()}
 
 @app.post("/ingest/bft")
 def ingest_bft(batch: BFTBatch):
     for t in batch.tracks:
+        _validate_side_layer(t.side, t.layer)
         upsert_track(t.uid, t.side, t.layer, t.lat, t.lon, t.meta)
     return {"ok": True, "count": len(batch.tracks)}
 
@@ -186,7 +294,7 @@ def pull_cot():
         ts = now.isoformat()
         ev.set("time", ts)
         ev.set("start", ts)
-        ev.set("stale", (now.replace(microsecond=0)).isoformat())
+        ev.set("stale", (now.replace(microsecond=0) + timedelta(seconds=60)).isoformat())
         pt = etree.SubElement(ev, "point")
         pt.set("lat", str(t["lat"]))
         pt.set("lon", str(t["lon"]))
@@ -202,6 +310,13 @@ def api_tak_status():
     if tak_bridge is None:
         return {"enabled": False, "reason": "TAK_HOST not configured"}
     return {"enabled": True, **tak_bridge.status()}
+
+
+@app.get("/api/live_feed/status")
+def api_live_feed_status():
+    if live_feed_poller is None:
+        return {"enabled": False, "reason": "LIVE_FEED_URL not configured"}
+    return live_feed_poller.status()
 
 # --- Simulated FPV drones ---------------------------------------------------
 FPV_DRONES = [
@@ -405,6 +520,10 @@ if TAK_HOST:
         upsert_fn=upsert_track,
         list_fn=list_tracks,
     )
+
+live_feed_poller: Optional[LiveFeedPoller] = None
+if LIVE_FEED_URL:
+    live_feed_poller = LiveFeedPoller(url=LIVE_FEED_URL, interval_s=LIVE_FEED_INTERVAL)
 
 @app.get("/video/mjpeg")
 def video_mjpeg():
