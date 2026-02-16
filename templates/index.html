@@ -17,14 +17,14 @@
   <link rel="stylesheet" href="/static/style.css"/>
 </head>
 <body class="bp5-dark">
-  <header class="topbar bp5-navbar">
+  <header class="bp5-navbar topbar">
     <div class="bp5-navbar-group bp5-align-left brand">
-      <div class="title">{{ app_title }}</div>
-      <div class="subtitle">Brigade & below • fast, uncluttered, comms-loss tolerant</div>
+      <span class="bp5-navbar-heading">{{ app_title }}</span>
+      <span class="subtitle bp5-text-muted">Brigade and below | fast, uncluttered, comms-loss tolerant</span>
     </div>
 
     <div class="bp5-navbar-group bp5-align-right controls">
-      <div class="toggles">
+      <div class="toggles" role="group" aria-label="Layer visibility">
         <label class="bp5-control bp5-switch"><input type="checkbox" data-layer="friendly" checked><span class="bp5-control-indicator"></span>Friendly</label>
         <label class="bp5-control bp5-switch"><input type="checkbox" data-layer="enemy" checked><span class="bp5-control-indicator"></span>Enemy</label>
         <label class="bp5-control bp5-switch"><input type="checkbox" data-layer="fires" checked><span class="bp5-control-indicator"></span>Fires</label>
@@ -33,7 +33,7 @@
         <label class="bp5-control bp5-switch"><input type="checkbox" data-layer="other" checked><span class="bp5-control-indicator"></span>Other</label>
       </div>
 
-      <div class="actions">
+      <div class="bp5-button-group actions" role="group" aria-label="Map actions">
         <button id="btn-center" class="bp5-button bp5-icon-locate">Center</button>
         <button id="btn-demo" class="bp5-button bp5-intent-primary bp5-icon-add">Inject Demo Tracks</button>
       </div>
@@ -45,34 +45,32 @@
       <div id="map"></div>
       <div class="statusbar bp5-card bp5-elevation-1">
         <span id="status" class="bp5-text-muted">Loading...</span>
-        <span class="sep">•</span>
-        <span class="bp5-text-muted">Stale threshold: <b>90s</b></span>
+        <span class="sep bp5-text-muted">|</span>
+        <span class="bp5-text-muted">Stale threshold: <strong>90s</strong></span>
       </div>
     </section>
 
     <aside class="sidepanel">
-      <div class="bp5-card bp5-elevation-1 panel">
+      <section class="bp5-card bp5-elevation-1 panel">
         <h4 class="bp5-heading panel-title">FMV (PiP)</h4>
         <div class="panel-body">
           <div class="video-box">
             <img id="mjpeg" src="/video/mjpeg" alt="FMV stream"/>
-            <div class="video-controls">
-              <button id="pip" class="bp5-button bp5-small bp5-icon-media">Picture-in-Picture</button>
-              <button id="pop" class="bp5-button bp5-small bp5-icon-share">Pop out</button>
-            </div>
           </div>
-          <div class="hint bp5-text-muted">
-            For RTSP: set <code>RTSP_URL</code>. This demo uses MJPEG for browser simplicity.
+          <div class="bp5-button-group video-controls" role="group" aria-label="FMV controls">
+            <button id="pip" class="bp5-button bp5-small bp5-icon-media">Picture-in-Picture</button>
+            <button id="pop" class="bp5-button bp5-small bp5-icon-share">Pop out</button>
           </div>
+          <p class="hint bp5-text-muted">For RTSP: set <code>RTSP_URL</code>. This demo uses MJPEG for browser simplicity.</p>
         </div>
-      </div>
+      </section>
 
-      <div class="bp5-card bp5-elevation-1 panel">
+      <section class="bp5-card bp5-elevation-1 panel">
         <h4 class="bp5-heading panel-title">Track List</h4>
         <div class="panel-body">
           <div id="tracklist" class="tracklist"></div>
         </div>
-      </div>
+      </section>
     </aside>
   </main>
 
