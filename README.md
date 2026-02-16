@@ -8,6 +8,7 @@ Lightweight tactical common operating picture (COP) application built with FastA
 - Persists tracks in SQLite (`cop.db` by default) with last-known-position behavior.
 - Marks stale tracks in the UI (stale threshold is currently 90 seconds in `static/app.js`).
 - Provides CoT ingest/export and optional TAK Server TCP bridge sync.
+- Uses zenoh as the core pub/sub layer for track updates.
 - Streams FMV as MJPEG (`/video/mjpeg`) from RTSP or a generated test feed.
 - Includes simulated FPV drone streams with telemetry overlays and COP track integration.
 
@@ -51,6 +52,11 @@ docker build -t tactical-cop-lite .
 docker run --rm -p 8000:8000 -v $(pwd)/data:/data --env-file .env tactical-cop-lite
 ```
 
+Docker Compose (app + zenoh core service):
+```bash
+docker compose up --build
+```
+
 Production config template:
 ```bash
 cp .env.example .env
@@ -61,7 +67,7 @@ Open:
 
 Health checks:
 - `GET /healthz`
-- `GET /readyz`
+- `GET /readyz` (requires DB and zenoh ready)
 
 ## API
 - `GET /api/tracks`: list all tracks + server UTC time.
@@ -72,6 +78,7 @@ Health checks:
 - `GET /tak/cot/pull`: export all tracks as CoT XML events.
 - `GET /api/tak/status`: TAK bridge status/counters.
 - `GET /api/live_feed/status`: external live-feed poller status/counters.
+- `GET /api/zenoh/status`: zenoh bridge status/counters.
 - `GET /video/mjpeg`: MJPEG stream endpoint.
 - `GET /api/fpv/drones`: returns simulated FPV drone list and stream URLs, and updates drone tracks in COP.
 - `GET /video/fpv/{drone_uid}.mjpeg`: simulated per-drone FPV MJPEG stream.
@@ -121,6 +128,16 @@ TAK bridge (enabled when `TAK_HOST` is set):
 | `TAK_CALLSIGN` | `COP-LITE` | Self-SA callsign sent by bridge |
 | `TAK_PUSH_INTERVAL` | `30` | Seconds between local track pushes to TAK |
 
+zenoh bridge (core service):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ZENOH_CONNECT` | `tcp/127.0.0.1:7447` | Comma-separated zenoh endpoints |
+| `ZENOH_PUB_KEYEXPR` | `cop/tracks` | Key expression used for publishing track updates |
+| `ZENOH_SUB_KEYEXPR` | `cop/tracks` | Key expression subscribed for incoming track updates |
+| `ZENOH_PUBLISH` | `true` | Publish local updates to zenoh |
+| `ZENOH_SUBSCRIBE` | `true` | Subscribe to remote updates from zenoh |
+
 PowerShell examples:
 ```powershell
 $env:COP_API_KEY="change-me"
@@ -132,6 +149,7 @@ $env:LIVE_FEED_INTERVAL="5"
 $env:TAK_HOST="192.168.1.100"
 $env:TAK_PORT="8087"
 $env:TAK_CALLSIGN="MY-COP"
+$env:ZENOH_CONNECT="tcp/127.0.0.1:7447"
 ```
 
 External live feed payload shape:
@@ -157,6 +175,13 @@ External live feed payload shape:
 - Sends periodic self-SA heartbeat.
 - Avoids echo loops by not re-pushing tracks marked with `meta.source == "tak_server"`.
 
+## Zenoh Bridge Notes
+- Bridge starts automatically on app startup.
+- If zenoh cannot initialize, app startup fails (fail-fast).
+- Publishes local track updates to `ZENOH_PUB_KEYEXPR`.
+- Subscribes for incoming updates on `ZENOH_SUB_KEYEXPR`.
+- Incoming zenoh updates are tagged with `meta.source == "zenoh"` and are not re-published.
+
 ## FMV Notes
 - Browsers do not natively play RTSP directly.
 - App converts RTSP -> MJPEG for browser playback.
@@ -167,5 +192,6 @@ External live feed payload shape:
 - Set `TRUSTED_HOSTS` to your domain(s) and edge hostnames.
 - Set `CORS_ORIGINS` only if you need browser access from other origins.
 - Disable docs in production (`ENABLE_DOCS=false`).
+- Ensure zenoh router/service is reachable at `ZENOH_CONNECT` before starting the app.
 - Put the app behind TLS termination (reverse proxy or ingress).
 - Monitor `GET /healthz` and `GET /readyz`.

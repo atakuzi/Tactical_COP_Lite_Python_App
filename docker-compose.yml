@@ -1,0 +1,21 @@
+services:
+  zenoh:
+    image: eclipse/zenoh:latest
+    container_name: tactical-cop-zenoh
+    command: ["zenohd", "--listen", "tcp/0.0.0.0:7447"]
+    ports:
+      - "7447:7447"
+
+  app:
+    build: .
+    container_name: tactical-cop-app
+    depends_on:
+      - zenoh
+    environment:
+      COP_DB_PATH: /data/cop.db
+      ENABLE_DOCS: "false"
+      ZENOH_CONNECT: tcp/zenoh:7447
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data

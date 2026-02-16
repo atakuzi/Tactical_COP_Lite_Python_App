@@ -25,6 +25,7 @@ from fastapi.templating import Jinja2Templates
 from lxml import etree
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from tak_bridge import TAKBridge
+from zenoh_bridge import ZenohBridge
 
 APP_TITLE = "Tactical COP Lite"
 
@@ -91,6 +92,13 @@ TAK_CA = os.getenv("TAK_CA", "").strip()
 TAK_CALLSIGN = os.getenv("TAK_CALLSIGN", "COP-LITE").strip() or "COP-LITE"
 TAK_PUSH_INTERVAL = _env_int("TAK_PUSH_INTERVAL", 30, minimum=5, maximum=3600)
 
+# Zenoh pub/sub bridge (core service).
+ZENOH_CONNECT = _env_csv("ZENOH_CONNECT") or ["tcp/127.0.0.1:7447"]
+ZENOH_PUB_KEYEXPR = os.getenv("ZENOH_PUB_KEYEXPR", "cop/tracks").strip() or "cop/tracks"
+ZENOH_SUB_KEYEXPR = os.getenv("ZENOH_SUB_KEYEXPR", "cop/tracks").strip() or "cop/tracks"
+ZENOH_PUBLISH = _env_bool("ZENOH_PUBLISH", True)
+ZENOH_SUBSCRIBE = _env_bool("ZENOH_SUBSCRIBE", True)
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -133,7 +141,17 @@ def init_db() -> None:
         conn.close()
 
 
-def upsert_track(uid: str, side: str, layer: str, lat: float, lon: float, meta: Dict[str, Any]) -> None:
+def upsert_track(
+    uid: str,
+    side: str,
+    layer: str,
+    lat: float,
+    lon: float,
+    meta: Dict[str, Any],
+    publish: bool = True,
+) -> None:
+    ts = utc_now_iso()
+    clean_meta = dict(meta or {})
     conn = _db_connection()
     try:
         conn.execute(
@@ -148,11 +166,24 @@ def upsert_track(uid: str, side: str, layer: str, lat: float, lon: float, meta: 
                 updated_at=excluded.updated_at,
                 meta_json=excluded.meta_json
             """,
-            (uid, side, layer, lat, lon, utc_now_iso(), json.dumps(meta or {}, separators=(",", ":"))),
+            (uid, side, layer, lat, lon, ts, json.dumps(clean_meta, separators=(",", ":"))),
         )
         conn.commit()
     finally:
         conn.close()
+
+    if publish and zenoh_bridge and clean_meta.get("source") != "zenoh":
+        zenoh_bridge.publish_track(
+            {
+                "uid": uid,
+                "side": side,
+                "layer": layer,
+                "lat": lat,
+                "lon": lon,
+                "updated_at": ts,
+                "meta": clean_meta,
+            }
+        )
 
 
 def list_tracks() -> List[Dict[str, Any]]:
@@ -504,10 +535,20 @@ live_feed_poller: Optional[LiveFeedPoller] = None
 if LIVE_FEED_URL:
     live_feed_poller = LiveFeedPoller(url=LIVE_FEED_URL, interval_s=LIVE_FEED_INTERVAL)
 
+zenoh_bridge = ZenohBridge(
+    pub_keyexpr=ZENOH_PUB_KEYEXPR,
+    sub_keyexpr=ZENOH_SUB_KEYEXPR,
+    connect_endpoints=ZENOH_CONNECT,
+    enable_publish=ZENOH_PUBLISH,
+    enable_subscribe=ZENOH_SUBSCRIBE,
+    upsert_fn=upsert_track,
+)
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    zenoh_bridge.start()
     if tak_bridge:
         tak_bridge.start()
     if live_feed_poller:
@@ -519,6 +560,7 @@ async def lifespan(_: FastAPI):
         tak_bridge.stop()
     if live_feed_poller:
         live_feed_poller.stop()
+    zenoh_bridge.stop()
     log.info("Application stopped")
 
 
@@ -583,6 +625,10 @@ def readyz():
         conn.close()
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"db unavailable: {e}")
+    z_status = zenoh_bridge.status()
+    if not z_status.get("ready"):
+        reason = z_status.get("last_error") or "zenoh not ready"
+        raise HTTPException(status_code=503, detail=f"zenoh unavailable: {reason}")
     return {"status": "ready", "time": utc_now_iso()}
 
 
@@ -695,6 +741,11 @@ def api_live_feed_status():
     if live_feed_poller is None:
         return {"enabled": False, "reason": "LIVE_FEED_URL not configured"}
     return live_feed_poller.status()
+
+
+@app.get("/api/zenoh/status")
+def api_zenoh_status():
+    return zenoh_bridge.status()
 
 
 @app.get("/api/fpv/drones")
