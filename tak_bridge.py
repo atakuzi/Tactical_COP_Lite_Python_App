@@ -34,6 +34,7 @@ class TAKBridge:
         host: str,
         port: int,
         tls: bool = False,
+        tls_insecure_skip_verify: bool = False,
         cert_path: str = "",
         key_path: str = "",
         ca_path: str = "",
@@ -45,6 +46,7 @@ class TAKBridge:
         self.host = host
         self.port = port
         self.tls = tls
+        self.tls_insecure_skip_verify = tls_insecure_skip_verify
         self.cert_path = cert_path
         self.key_path = key_path
         self.ca_path = ca_path
@@ -118,9 +120,12 @@ class TAKBridge:
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             if self.ca_path:
                 ctx.load_verify_locations(self.ca_path)
-            else:
+            elif self.tls_insecure_skip_verify:
+                log.warning("TAK TLS certificate verification is DISABLED")
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
+            else:
+                ctx.load_default_certs()
             if self.cert_path and self.key_path:
                 ctx.load_cert_chain(certfile=self.cert_path, keyfile=self.key_path)
             raw = ctx.wrap_socket(raw, server_hostname=self.host)
