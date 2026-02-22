@@ -2,6 +2,8 @@
 
 Lightweight tactical common operating picture (COP) application built with FastAPI + Mapbox GL JS.
 
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white) ![JavaScript](https://img.shields.io/badge/JavaScript-ES6%2B-F7DF1E?logo=javascript&logoColor=black) ![HTML5](https://img.shields.io/badge/HTML5-Markup-E34F26?logo=html5&logoColor=white) ![CSS3](https://img.shields.io/badge/CSS3-Styling-1572B6?logo=css3&logoColor=white)
+
 ## What It Does
 - Displays live tracks on an interactive map with MIL-STD-2525/APP-6 style symbols (`milsymbol`).
 - Supports layer filtering (`friendly`, `enemy`, `fires`, `air`, `ew`, `other`).
@@ -268,3 +270,6 @@ ADS-B feed payload shapes supported:
 - Ensure zenoh router/service is reachable at `ZENOH_CONNECT` before starting the app.
 - Put the app behind TLS termination (reverse proxy or ingress).
 - Monitor `GET /healthz` and `GET /readyz`.
+
+
+
